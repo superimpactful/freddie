@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Freddie</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #000;
+            overflow: hidden;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+        }
+        
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        #videoElement {
+            display: none;
+        }
+        
+        #canvas {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+        
+        #controls {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+            z-index: 100;
+        }
+        
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            background: rgba(255, 255, 255, 0.9);
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        
+        button:active {
+            transform: scale(0.95);
+        }
+        
+        #status {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-size: 14px;
+            z-index: 100;
+        }
+        
+        .recording {
+            background: #ff4444 !important;
+            color: white !important;
+            animation: pulse 1.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        
+        #flipButton {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.9);
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <div id="status">Initializing...</div>
+    
+    <div id="container">
+        <video id="videoElement" autoplay playsinline></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    
+    <button id="flipButton">🔄</button>
+    
+    <div id="controls">
+        <button id="recordButton">Record</button>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+
+    <script>
+        const videoElement = document.getElementById('videoElement');
+        const canvasElement = document.getElementById('canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        const recordButton = document.getElementById('recordButton');
+        const flipButton = document.getElementById('flipButton');
+        
+        let facingMode = 'user'; // 'user' for front camera, 'environment' for back
+        let mediaRecorder;
+        let recordedChunks = [];
+        let isRecording = false;
+        let faceMesh;
+        let camera;
+        
+        // Distortion parameters - we'll tune these together
+        const DISTORTION = {
+            horizontalScale: 1.3,      // How much to widen the face
+            verticalScale: 0.85,       // How much to compress vertically
+            foreheadExpansion: 1.4,    // How much to expand the forehead
+            smileAmplification: 1.5,   // How much to exaggerate smiles
+            cheekBulge: 1.35          // How much to bulge the cheeks
+        };
+        
+        function updateStatus(message) {
+            statusDiv.textContent = message;
+        }
+        
+        function onResults(results) {
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+            
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+                updateStatus('Face detected - Filter active');
+                
+                // Apply distortion
+                applyDistortion(results.image, results.multiFaceLandmarks[0]);
+            } else {
+                updateStatus('No face detected');
+                // Just show the regular video
+                canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            }
+            
+            canvasCtx.restore();
+        }
+        
+        function applyDistortion(image, landmarks) {
+            const width = canvasElement.width;
+            const height = canvasElement.height;
+            
+            // Get key facial landmarks
+            const noseTip = landmarks[4];
+            const leftEye = landmarks[33];
+            const rightEye = landmarks[263];
+            const topHead = landmarks[10];
+            const chin = landmarks[152];
+            const leftMouth = landmarks[61];
+            const rightMouth = landmarks[291];
+            const upperLip = landmarks[0];
+            const lowerLip = landmarks[17];
+            
+            // Calculate face center and dimensions
+            const faceCenterX = noseTip.x * width;
+            const faceCenterY = noseTip.y * height;
+            const faceWidth = Math.abs(rightEye.x - leftEye.x) * width;
+            const faceHeight = Math.abs(chin.y - topHead.y) * height;
+            
+            // Detect smile (distance between mouth corners)
+            const mouthWidth = Math.abs(rightMouth.x - leftMouth.x) * width;
+            const mouthHeight = Math.abs(lowerLip.y - upperLip.y) * height;
+            const smileIntensity = Math.min(mouthWidth / faceWidth * 2, 1);
+            
+            // Create distortion map
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = width;
+            tempCanvas.height = height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(image, 0, 0, width, height);
+            
+            const imageData = tempCtx.getImageData(0, 0, width, height);
+            const outputData = canvasCtx.createImageData(width, height);
+            
+            // Apply pixel-by-pixel distortion
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    // Calculate distance from face center
+                    const dx = x - faceCenterX;
+                    const dy = y - faceCenterY;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    const maxDistance = Math.max(faceWidth, faceHeight);
+                    
+                    // Only distort within face region
+                    if (distance < maxDistance * 1.2) {
+                        const normalizedDist = distance / maxDistance;
+                        
+                        // Horizontal widening (stronger at cheeks)
+                        let newX = x;
+                        const cheekFactor = Math.exp(-Math.pow(normalizedDist - 0.5, 2) / 0.1);
+                        const horizontalShift = dx * (DISTORTION.horizontalScale - 1) * (1 - normalizedDist) * 
+                                              (1 + cheekFactor * (DISTORTION.cheekBulge - 1));
+                        newX = x - horizontalShift;
+                        
+                        // Vertical compression
+                        let newY = y;
+                        const verticalShift = dy * (1 - DISTORTION.verticalScale) * (1 - normalizedDist);
+                        newY = y + verticalShift;
+                        
+                        // Forehead expansion (upper portion of face)
+                        if (y < faceCenterY) {
+                            const foreheadFactor = 1 - (y - topHead.y * height) / (faceCenterY - topHead.y * height);
+                            if (foreheadFactor > 0) {
+                                const foreheadExpand = foreheadFactor * (DISTORTION.foreheadExpansion - 1);
+                                newX = faceCenterX + (newX - faceCenterX) * (1 + foreheadExpand);
+                            }
+                        }
+                        
+                        // Smile amplification (lower face)
+                        if (y > faceCenterY && smileIntensity > 0.3) {
+                            const mouthRegionFactor = Math.exp(-Math.pow((y - lowerLip.y * height) / (faceHeight * 0.2), 2));
+                            const smileExpand = mouthRegionFactor * smileIntensity * (DISTORTION.smileAmplification - 1);
+                            const mouthCenterX = (leftMouth.x + rightMouth.x) / 2 * width;
+                            newX = mouthCenterX + (newX - mouthCenterX) * (1 + smileExpand);
+                            newY = lowerLip.y * height + (newY - lowerLip.y * height) * (1 + smileExpand * 0.5);
+                        }
+                        
+                        // Bounds checking and pixel sampling
+                        newX = Math.max(0, Math.min(width - 1, Math.round(newX)));
+                        newY = Math.max(0, Math.min(height - 1, Math.round(newY)));
+                        
+                        const srcIndex = (newY * width + newX) * 4;
+                        const dstIndex = (y * width + x) * 4;
+                        
+                        outputData.data[dstIndex] = imageData.data[srcIndex];
+                        outputData.data[dstIndex + 1] = imageData.data[srcIndex + 1];
+                        outputData.data[dstIndex + 2] = imageData.data[srcIndex + 2];
+                        outputData.data[dstIndex + 3] = imageData.data[srcIndex + 3];
+                    } else {
+                        // Outside face region - copy as is
+                        const srcIndex = (y * width + x) * 4;
+                        outputData.data[srcIndex] = imageData.data[srcIndex];
+                        outputData.data[srcIndex + 1] = imageData.data[srcIndex + 1];
+                        outputData.data[srcIndex + 2] = imageData.data[srcIndex + 2];
+                        outputData.data[srcIndex + 3] = imageData.data[srcIndex + 3];
+                    }
+                }
+            }
+            
+            canvasCtx.putImageData(outputData, 0, 0);
+        }
+        
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: facingMode,
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    },
+                    audio: false
+                });
+                
+                videoElement.srcObject = stream;
+                
+                faceMesh = new FaceMesh({
+                    locateFile: (file) => {
+                        return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+                    }
+                });
+                
+                faceMesh.setOptions({
+                    maxNumFaces: 1,
+                    refineLandmarks: true,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+                
+                faceMesh.onResults(onResults);
+                
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await faceMesh.send({ image: videoElement });
+                    },
+                    width: 1280,
+                    height: 720
+                });
+                
+                camera.start();
+                updateStatus('Camera ready');
+                
+            } catch (error) {
+                updateStatus('Camera access denied');
+                console.error('Error accessing camera:', error);
+            }
+        }
+        
+        function toggleRecording() {
+            if (!isRecording) {
+                startRecording();
+            } else {
+                stopRecording();
+            }
+        }
+        
+        function startRecording() {
+            recordedChunks = [];
+            const stream = canvasElement.captureStream(30);
+            
+            mediaRecorder = new MediaRecorder(stream, {
+                mimeType: 'video/webm;codecs=vp9',
+                videoBitsPerSecond: 5000000
+            });
+            
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    recordedChunks.push(event.data);
+                }
+            };
+            
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `freddie-${Date.now()}.webm`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+            
+            mediaRecorder.start();
+            isRecording = true;
+            recordButton.textContent = 'Stop';
+            recordButton.classList.add('recording');
+            updateStatus('Recording...');
+        }
+        
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                isRecording = false;
+                recordButton.textContent = 'Record';
+                recordButton.classList.remove('recording');
+                updateStatus('Face detected - Filter active');
+            }
+        }
+        
+        async function flipCamera() {
+            facingMode = facingMode === 'user' ? 'environment' : 'user';
+            
+            if (camera) {
+                camera.stop();
+            }
+            
+            if (videoElement.srcObject) {
+                videoElement.srcObject.getTracks().forEach(track => track.stop());
+            }
+            
+            await startCamera();
+        }
+        
+        recordButton.addEventListener('click', toggleRecording);
+        flipButton.addEventListener('click', flipCamera);
+        
+        // Initialize
+        startCamera();
+    </script>
+</body>
+</html>
